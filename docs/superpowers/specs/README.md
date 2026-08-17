@@ -22,8 +22,9 @@ They are **superseded for new implementation work** by the canonical file above.
 
 ```text
 Canonical design
-  > historical main design
-  > historical amendments / review snapshots
+  > all historical design/amendment records for new implementation work
 ```
+
+The historical files preserve the review trail and may contain superseded wording; they are not an independent implementation authority after the canonical consolidation.
 
 If a future approved design changes behavior, update the canonical design (or create its explicit successor) and update this index in the same change.
