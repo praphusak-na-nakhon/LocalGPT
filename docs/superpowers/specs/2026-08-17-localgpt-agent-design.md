@@ -2778,3 +2778,192 @@ Phase 1 succeeds when LocalGPT Agent behaves as a local, elevated Windows coding
 - every important action can be reconstructed from Control Center audit/activity
 
 It must be powerful, observable and predictable on a trusted developer workstation. It must not misrepresent raw shell, project scripts, authentication, audit or content-provenance controls as a hardened sandbox or malware-resistant isolation boundary.
+
+## 39. Guarded-mode dogfood, classifier friction and tuning
+
+This section adds an **operational tuning requirement** to Sections 11, 23, 29–31 and 36. It does not weaken the risk model or any canonical `SEC-*` invariant.
+
+### 39.1 UX risk being managed
+
+Guarded mode intentionally escalates `opaque_or_unknown` raw-shell execution to at least R2. This is safer than silently treating unknown command shapes as R1, but an over-conservative classifier can create repeated approval friction.
+
+For a personal LocalGPT installation, the realistic failure mode is not that Autonomous persists across restart — `SEC-MODE-001` prevents that — but that the user repeatedly enables Autonomous and leaves it enabled for a long-running session because ordinary commands are being classified as opaque too often.
+
+The product goal is therefore:
+
+> **Keep Guarded useful enough that the user does not need Autonomous merely to work around classifier noise, without weakening the rule that genuinely opaque execution is gated.**
+
+Classifier tuning is an operational quality problem, not a reason to relax R3 or silently auto-promote unknown execution.
+
+### 39.2 Local-only dogfood metrics
+
+Phase 1 dogfood must derive classifier-friction metrics from existing local `tool_calls`, `approvals`, `sessions` and `audit_events`. No external analytics/telemetry service is required and these metrics must not be uploaded by default.
+
+Recommended local metrics over a bounded reporting window, default **7 days**:
+
+```text
+opaque_rate
+  = opaque_or_unknown raw-shell calls / all raw-shell calls
+
+opaque_approval_rate
+  = opaque R2 calls that created approvals / opaque R2 calls
+
+opaque_human_allow_rate
+  = human-approved opaque R2 calls / decided opaque R2 calls
+
+repeat_approved_shape_count
+  = repeated human-approved opaque calls grouped by audit-safe command shape
+
+opaque_approval_latency
+  = time from opaque R2 approval creation to final human decision
+
+autonomous_after_opaque_count
+  = Autonomous activations within the observation window after an opaque R2 friction event
+```
+
+For correlation between an opaque friction event and enabling Autonomous, use a default observation window of **10 minutes**. This is a product-tuning heuristic, not a security boundary.
+
+`opaque_rate` is **not** automatically a false-positive rate. The system cannot know that a command was “normal” merely because the user approved it. Repeated human approval is evidence for manual review, not proof of safety.
+
+### 39.3 Audit-safe command shapes
+
+Dogfood reporting must not group or display arbitrary raw command text without redaction because commands may contain tokens, paths, URLs, credentials or user data.
+
+Classifier metrics should use an audit-safe normalized `commandShape`, for example:
+
+```text
+git status
+npm --version
+node --version
+npm run <script>
+node <script-path>
+powershell <script-path>
+<unknown-executable> <args-redacted>
+```
+
+Where useful, `tool_calls` may persist bounded classifier metadata such as:
+
+```text
+classification_shape TEXT NULL
+inspector_rule_version TEXT NULL
+```
+
+Rules:
+
+- `classification_shape` is normalized/redacted and must not contain bearer credentials or known secret values
+- raw command remains subject to the existing audit redaction policy
+- `inspector_rule_version` allows before/after comparison when classifier rules change
+- dogfood reports should prefer shape/family aggregates over full command strings
+
+### 39.4 Manual tuning; no automatic trust promotion
+
+LocalGPT must **not** implement a rule such as:
+
+```text
+user approved this command N times
+→ automatically make it R1/direct_known forever
+```
+
+Repeated approval does not establish safety, and a malicious repository could exploit automatic familiarity learning.
+
+Dogfood evidence is used to propose classifier-rule changes that are then reviewed explicitly and covered by regression tests.
+
+Promotion to `direct_known` should be based on **command shape + context**, not executable name alone. Relevant context may include:
+
+- parsed verb/subcommand/flags
+- shell type
+- executable resolution/source when relevant
+- cwd/workspace relationship
+- whether execution delegates to repository-controlled scripts/hooks
+- known redirection/pipeline/indirection semantics
+
+Candidate `direct_known` shapes may include narrowly defined inspection/version commands such as:
+
+```text
+git status
+git diff
+git log
+node --version
+npm --version
+```
+
+These examples are candidates, not a blanket executable allowlist.
+
+Commands such as the following must not be promoted merely because their executable name is familiar:
+
+```text
+npm test
+npm run <script>
+pnpm run <script>
+node <repository-script>
+.<path-to-script>.ps1
+unknown/internal executables
+```
+
+`npm test`/`npm run`/`pnpm run` remain subject to the existing `repository_controlled` execution model. A familiar top-level command does not erase `SEC-EXEC-001`.
+
+### 39.5 Control Center / Doctor presentation
+
+Activity and Doctor should be able to expose a compact **Guarded Friction** view from local audit data, for example:
+
+```text
+Guarded Friction — last 7 days
+
+Raw-shell calls                 184
+Opaque classifications          21  (11.4%)
+Human-approved opaque           18
+Denied opaque                    3
+Autonomous activations           2
+Median opaque approval latency  8s
+
+Top repeated opaque shapes
+foo-cli <args-redacted>          8
+powershell <script-path>         6
+node <script-path>               4
+other                            3
+```
+
+Presentation rules:
+
+- this view is local-only operational diagnostics
+- do not expose secrets or unredacted sensitive arguments
+- high opaque rate may be `INFO`/`WARN`, but must not automatically disable Guarded or enable Autonomous
+- Doctor should explain that repeated approved shapes are **tuning candidates**, not trusted commands
+- Activity should allow filtering by `executionTransparency=opaque_or_unknown`
+- if Autonomous is repeatedly enabled shortly after opaque approvals, surface that as a UX-friction signal rather than a security-policy recommendation
+
+### 39.6 Testing requirements
+
+Add regression/unit coverage for:
+
+- command-shape normalization/redaction does not leak known secret fixtures
+- metrics count only raw-shell calls in the intended denominator
+- opaque approval joins do not count R3 as R2 friction
+- Autonomous correlation uses bounded session-local timestamps and never changes policy
+- repeated human approval never mutates classifier rules at runtime
+- classifier rule changes require explicit code/config review path plus regression tests
+- familiar executable name alone does not force `direct_known`
+- ProjectAdapter `npm test` remains `repository_controlled`, not converted to `direct_known` by dogfood tuning
+- `git status`-style narrowly reviewed rules can become `direct_known` without weakening destructive Git detection
+
+Dogfood metrics themselves are not a release security guarantee and Phase 1 does not define a universal acceptable `opaque_rate` threshold. The purpose is to obtain evidence from real personal use and reduce unnecessary Guarded friction without weakening security semantics.
+
+### 39.7 Phase 1 hardening acceptance
+
+During Phase 1.8 dogfood/hardening:
+
+1. collect a bounded local Guarded-friction baseline
+2. review the highest-frequency repeated opaque command shapes
+3. identify which are truly direct/transparent versus repository-controlled/opaque
+4. add narrowly scoped `direct_known` rules only when justified
+5. add regression tests before considering the tuning complete
+6. compare `opaque_rate` and approval friction after the rule change
+7. verify no rule change affects `SEC-R3-001..003`, `SEC-EXEC-001` or session reset semantics
+
+The Phase 1 release gate should include evidence that the report can be generated and that classifier tuning does not rely on runtime auto-learning. It should **not** block release on an arbitrary fixed opaque-rate percentage before sufficient dogfood data exists.
+
+### 39.8 Implementation constraint
+
+Treat the following as fixed for Phase 1:
+
+> **Guarded classifier tuning is evidence-driven and local-only. Repeated approvals may identify candidates for human-reviewed rules, but they never automatically grant trust, lower risk, persist Autonomous mode, or bypass existing approval/security invariants.**
